@@ -1,0 +1,197 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Dec 11 16:02:24 2018
+
+@author: opsuser
+"""
+
+from osgeo import gdal, ogr, osr
+from collections import OrderedDict
+import datetime as dt
+import pandas as pd
+import calendar
+import os
+import math
+import logging
+import ast
+
+class sigmets_shapes():
+    
+    def __init__(self, sigmets, fir_shapefile):
+        '''
+        Initiates an instance to create shapefiles of SIGMETs
+        '''
+        self.sigmets_df = pd.read_csv(sigmets)
+        self.fir_shapefile = fir_shapefile
+        self.corners = {'NE': [15, 120], 'SE': [-10, 120], 'SW': [-10, 90], 'NW': [15, 90]}
+
+    def sort_clockwise(self, lat_lon_pairs):
+        '''
+        sorts lat lon pairs into clockwise order
+        '''
+        def centeroidpython(data):
+            x, y = zip(*data)
+            l = len(x)
+            return sum(x) / l, sum(y) / l
+        
+        xy_pairs = lat_lon_pairs        
+        centroid_x, centroid_y = centeroidpython(xy_pairs)
+        xy_sorted = sorted(xy_pairs, key = lambda x: math.atan2((x[1]-centroid_y),(x[0]-centroid_x)))
+        return xy_sorted
+
+    def get_shape_type(self, sigmet_position):
+        '''
+        Identifies the type of SIGMET shape's construction
+        '''            
+        if 'WI'in sigmet_position:
+            shape_type = 'polygon'
+        elif len(sigmet_position) > 1:
+            shape_type = 'two lines'
+        elif type(sigmet_position.values()[0]) == list:
+            shape_type = 'oblique line'
+        elif type(sigmet_position.values()[0]) == float:
+            shape_type = 'horizontal/vertical line'
+        return shape_type
+
+    def intersect_fir(self, interim_poly):
+        '''
+        Intersect interim_polygon created for 'oblique line', 'two lines', 'horizontal/vertical line' SIGMET to create the SIGMET area
+        '''
+        fir = ogr.Open(self.fir_shapefile)
+        shape = fir.GetLayer()
+        feature = shape.GetFeature(0)
+        geom = feature.GetGeometryRef()
+        poly = interim_poly.Intersection(geom)
+        return poly
+
+    def create_polygon(self, shape_type, sigmet_position):
+        '''
+        Creates SIGMET polygons
+        '''
+        if shape_type == 'polygon':
+            lat_lon_pairs = self.sort_clockwise(sigmet_position['WI'])
+            lat_lon_pairs = lat_lon_pairs[1:]
+            lat_lon_pairs.append(lat_lon_pairs[0]) # first point is repeated in sigmet_position
+            outRing = ogr.Geometry(ogr.wkbLinearRing)
+            for lat_lon in lat_lon_pairs:
+                outRing.AddPoint(lat_lon[1], lat_lon[0])
+            poly = ogr.Geometry(ogr.wkbPolygon)
+            poly.AddGeometry(outRing)
+            return poly
+        elif shape_type == 'two lines':
+            if 'E' in sigmet_position and 'N' in sigmet_position:
+                lat_lon_pairs = [[sigmet_position['N'], sigmet_position['E']], [self.corners['NE'][0], sigmet_position['E']], self.corners['NE'], [sigmet_position['N'], self.corners['NE'][1]]]
+            elif 'E' in sigmet_position and 'S' in sigmet_position:
+                lat_lon_pairs = [[sigmet_position['S'], sigmet_position['E']], [self.corners['SE'][0], sigmet_position['E']], self.corners['SE'], [sigmet_position['S'], self.corners['SE'][1]]]
+            elif 'W' in sigmet_position and 'S' in sigmet_position:
+                lat_lon_pairs = [[sigmet_position['S'], sigmet_position['W']], [self.corners['SW'][0], sigmet_position['W']], self.corners['SW'], [sigmet_position['S'], self.corners['SW'][1]]]
+            elif 'W' in sigmet_position and 'N' in sigmet_position:
+                lat_lon_pairs = [[sigmet_position['N'], sigmet_position['W']], [self.corners['NW'][0], sigmet_position['W']], self.corners['NW'], [sigmet_position['N'], self.corners['NW'][1]]]
+            lat_lon_pairs = self.sort_clockwise(lat_lon_pairs)
+            lat_lon_pairs.append(lat_lon_pairs[0])            
+            outRing = ogr.Geometry(ogr.wkbLinearRing)
+            for lat_lon in lat_lon_pairs:
+                outRing.AddPoint(lat_lon[1], lat_lon[0])
+            interim_poly = ogr.Geometry(ogr.wkbPolygon)
+            interim_poly.AddGeometry(outRing)
+            poly = self.intersect_fir(interim_poly)
+            return poly
+        elif shape_type == 'oblique line':
+            if 'E' in sigmet_position:
+                lat_lon_pairs = [sigmet_position['E'][0], sigmet_position['E'][1], self.corners['NE'], self.corners['SE']]
+            elif 'S' in sigmet_position:
+                lat_lon_pairs = [sigmet_position['S'][0], sigmet_position['S'][1], self.corners['SE'], self.corners['SW']]
+            elif 'W' in sigmet_position:
+                lat_lon_pairs = [sigmet_position['W'][0], sigmet_position['W'][1], self.corners['SW'], self.corners['NW']]
+            elif 'N' in sigmet_position:
+                lat_lon_pairs = [sigmet_position['N'][0], sigmet_position['N'][1], self.corners['NW'], self.corners['NE']]
+            elif 'SE' in sigmet_position:
+                lat_lon_pairs = [sigmet_position['SE'][0], sigmet_position['SE'][1], self.corners['NE'], self.corners['SE'], self.corners['SW']]
+            elif 'SW' in sigmet_position:
+                lat_lon_pairs = [sigmet_position['SW'][0], sigmet_position['SW'][1], self.corners['SE'], self.corners['SW'], self.corners['NW']]
+            elif 'NW' in sigmet_position:
+                lat_lon_pairs = [sigmet_position['NW'][0], sigmet_position['NW'][1], self.corners['SW'], self.corners['NW'], self.corners['NE']]
+            elif 'NE' in sigmet_position:
+                lat_lon_pairs = [sigmet_position['NE'][0], sigmet_position['NE'][1], self.corners['NW'], self.corners['NE'], self.corners['SE']]
+            lat_lon_pairs = self.sort_clockwise(lat_lon_pairs)
+            lat_lon_pairs.append(lat_lon_pairs[0])
+            print lat_lon_pairs
+            outRing = ogr.Geometry(ogr.wkbLinearRing)
+            for lat_lon in lat_lon_pairs:
+                outRing.AddPoint(lat_lon[1], lat_lon[0])
+            interim_poly = ogr.Geometry(ogr.wkbPolygon)
+            interim_poly.AddGeometry(outRing)
+            poly = self.intersect_fir(interim_poly)
+      
+            return poly
+        elif shape_type == 'horizontal/vertical line':
+            if 'E' in sigmet_position:
+                lat_lon_pairs = [[self.corners['NE'][0], sigmet_position['E']], self.corners['NE'], self.corners['SE'], [self.corners['SE'][0], sigmet_position['E']]]
+            elif 'S' in sigmet_position:
+                lat_lon_pairs = [[sigmet_position['S'], self.corners['SE'][1]], self.corners['SE'], self.corners['SW'], [sigmet_position['S'], self.corners['SW'][1]]]
+            elif 'W' in sigmet_position:
+                lat_lon_pairs = [[self.corners['NW'][0], sigmet_position['W']], self.corners['NW'], self.corners['SW'], [self.corners['SW'][0], sigmet_position['W']]]
+            elif 'N' in sigmet_position:
+                lat_lon_pairs = [[sigmet_position['N'], self.corners['NE'][1]], self.corners['NE'], self.corners['NW'], [sigmet_position['N'], self.corners['NW'][1]]]
+            lat_lon_pairs = self.sort_clockwise(lat_lon_pairs)
+            lat_lon_pairs.append(lat_lon_pairs[0])
+            outRing = ogr.Geometry(ogr.wkbLinearRing)
+            for lat_lon in lat_lon_pairs:
+                outRing.AddPoint(lat_lon[1], lat_lon[0])
+            interim_poly = ogr.Geometry(ogr.wkbPolygon)
+            interim_poly.AddGeometry(outRing)
+            poly = self.intersect_fir(interim_poly)
+            return poly
+   
+    def draw(self, poly, filename, updated_validity_end):
+        '''
+        Draws SIGMET area and outputs as shapefile
+        '''
+        # Now convert it to a shapefile with OGR    
+        driver = ogr.GetDriverByName('Esri Shapefile')
+        ds = driver.CreateDataSource(r'C:\TYF\SatTS\SIGMET_shapes\%s_shape.shp' %filename)
+        layer = ds.CreateLayer('', None, ogr.wkbPolygon)
+        # Add one attribute
+        layer.CreateField(ogr.FieldDefn('id', ogr.OFTInteger))
+        defn = layer.GetLayerDefn()
+        ## If there are multiple geometries, put the "for" loop here
+        # Create a new feature (attribute and geometry)
+        feat = ogr.Feature(defn)
+        feat.SetField('id', updated_validity_end.strftime("%y%m%d%H%M"))
+        #feat.SetField('sigmet_number', self.sigmet_number)
+        # Make a geometry, from Shapely object
+        geom = poly
+        feat.SetGeometry(geom)    
+        layer.CreateFeature(feat)
+        feat = geom = None  # destroy these
+        # Save and close everything
+        ds = layer = feat = geom = None
+        
+    def output_shapes(self):
+        '''
+        outputs shapes for every SIGMET issued
+        '''
+        for index, row in self.sigmets_df.iterrows():
+            filename = row['filename']
+            issue_datetime = dt.datetime.strptime(row['issue_datetime'], '%Y-%m-%d %H:%M:%S')
+            validity_start = dt.datetime.strptime(row['validity_start'], '%Y-%m-%d %H:%M:%S')
+            updated_validity_end = dt.datetime.strptime(row['updated_validity_end'], '%Y-%m-%d %H:%M:%S')
+            sigmet_type = row['sigmet_type']
+            sigmet_number = row['sigmet_number']
+            sigmet_number_to_cancel = row['sigmet_number_to_cancel']
+            sigmet_position = ast.literal_eval(row['sigmet_position'])
+            if sigmet_type != 'CNL':
+                shape_type = self.get_shape_type(sigmet_position)
+                poly = self.create_polygon(shape_type, sigmet_position)
+                self.draw(poly, filename, updated_validity_end)
+                if filename in ['WSSR20WSSS020252', 'WSSR20WSSS020550_shape', 'WSSR20WSSS030152', 'WSSR20WSSS040653', 'WSSR20WSSS040836', 'WSSR20WSSS070102', 'WSSR20WSSS070500', 'WSSR20WSSS071642', 'WSSR20WSSS071925', 'WSSR20WSSS072225', 'WSSR20WSSS112048', 'WSSR20WSSS122128', 'WSSR20WSSS130021', 'WSSR20WSSS130252', ]:
+                    print index
+                    print sigmet_position
+                    print shape_type
+            #WSSR20WSSS071642_shape  WSSR20WSSS071925_shape  WSSR20WSSS072225_shape
+        
+fir_shapefile = r'C:\TYF\Shapefile\SG_FIR\Singapore_FIR.shp'
+sigmets = r'C:\TYF\SatTS\SIGMETS_201807.csv'
+sig_shape = sigmets_shapes(sigmets, fir_shapefile)
+
+sig_shape.output_shapes()
